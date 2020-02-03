@@ -1,0 +1,8 @@
+{
+  "domain": "wha",
+  "name": "Whole Home Audio",
+  "documentation": "nowhere",
+  "dependencies": ["snapcast"],
+  "codeowners": ["@uspike"],
+  "requirements": []
+}
