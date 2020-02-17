@@ -11,6 +11,9 @@ from homeassistant.const import (
     STATE_OFF,
     STATE_ON,
     STATE_UNKNOWN,
+    STATE_PLAYING,
+    STATE_PAUSED,
+    STATE_STOPPED,
 )
 from homeassistant.components.media_player import PLATFORM_SCHEMA, MediaPlayerDevice
 from homeassistant.components.media_player.const import (
@@ -21,9 +24,11 @@ from homeassistant.components.media_player.const import (
     SUPPORT_VOLUME_MUTE,
     SUPPORT_VOLUME_SET,
     SUPPORT_VOLUME_STEP,
+    SUPPORT_PLAY,
+    SUPPORT_PAUSE,
+    SUPPORT_STOP,
 )
 from homeassistant.core import callback
-from homeassistant.helpers import collection
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -63,15 +68,31 @@ SPEAKER_SCHEMA = vol.Schema({
     },
 })
 
+SOURCE_SCHEMA = vol.Schema({
+    vol.Required('name'): cv.string,
+    vol.Required('snapcast_source'): cv.string,
+    vol.Optional('source'): {
+        vol.Required('name'): cv.string,
+        vol.Required('entity_id'): cv.entity_id,
+        vol.Optional('play_media'): vol.Schema({}, extra=vol.ALLOW_EXTRA),
+    },
+})
+
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_NAME): cv.string,
     vol.Required('snapgroup'): cv.entity_id,
+    vol.Required('sources'): [SOURCE_SCHEMA],
     vol.Required(CONF_SPEAKERS): [SPEAKER_SCHEMA],
 })
 
 
-class WHAStorageCollection(collection.StorageCollection):
-    pass
+async def _call_service(hass, name, entity_id, data=None):
+    if data is None:
+        data = {}
+    data["entity_id"] = entity_id
+    return await hass.services.async_call(DOMAIN, name, data)
+
+
 
 
 async def async_setup_platform(hass, config, add_entities, discovery_info=None):
@@ -79,21 +100,59 @@ async def async_setup_platform(hass, config, add_entities, discovery_info=None):
         Speaker(hass, conf)
         for conf in config.get(CONF_SPEAKERS)
     ]
+    sources = {
+        conf['name']: Source(hass, conf)
+        for conf in config['sources']
+    }
     group = Group(
         hass,
         config.get(CONF_NAME),
         config.get("snapgroup"),
         speakers,
+        sources,
     )
-    for speaker in speakers:
-        speaker._group = group
     add_entities([group] + speakers)
+
+
+class Source:
+    def __init__(self, hass, config):
+        self.hass = hass
+        self.config = config
+        self.name = config['name']
+        self.snapcast_source = config['snapcast_source']
+
+    async def select(self):
+        if 'source' in self.config:
+            source = self.config['source']
+            data = {"source": source['name']}
+            await _call_service(self.hass, "select_source", source['entity_id'], data)
+
+    async def play_media(self):
+        if 'play_media' in self.config:
+            source = self.config['source']
+            data = self.config['play_media']
+            await _call_service(self.hass, "play_media", source['entity_id'], data)
+
+    async def media_play(self):
+        if 'source' in self.config:
+            source = self.config['source']
+            await _call_service(self.hass, "media_play", source['entity_id'])
+
+    async def media_pause(self):
+        if 'source' in self.config:
+            source = self.config['source']
+            await _call_service(self.hass, "media_pause", source['entity_id'])
+
+    async def media_stop(self):
+        if 'source' in self.config:
+            source = self.config['source']
+            await _call_service(self.hass, "media_stop", source['entity_id'])
+
 
 
 class Speaker(MediaPlayerDevice, RestoreEntity):
     def __init__(self, hass, config):
         self._hass = hass
-        self._group = None
         self._state = STATE_OFF
         self._name = config.get(CONF_NAME)
         self._snap = Wrapped(hass, config[CONF_SNAPCLIENT])
@@ -219,13 +278,17 @@ class Speaker(MediaPlayerDevice, RestoreEntity):
 
 
 class Wrapped:
-    def __init__(self, hass, config):
+    def __init__(self, hass, config, volume_scale=None):
         self.hass = hass
         self.entity_id = config.get(CONF_ENTITY_ID)
         self.source = config.get('source')
         volume_cfg = config.get('volume', {})
         self.min_volume = volume_cfg.get(CONF_MIN, 0) / 100
         self.max_volume = volume_cfg.get(CONF_MAX, 100) / 100
+        if volume_scale is not None:
+            self.volume_scale = self.max_volume - self.min_volume
+        else:
+            self.volume_scale = 1
         self.default_volume = volume_cfg.get(CONF_DEFAULT)
         self.default_source = None
 
@@ -236,10 +299,6 @@ class Wrapped:
     @property
     def attrs(self):
         return getattr(self.state, 'attributes', {})
-
-    @property
-    def volume_scale(self):
-        return self.max_volume - self.min_volume
 
     def get_volume_level(self, volume):
         return self.min_volume + (self.volume_scale * volume)
@@ -255,27 +314,29 @@ class Wrapped:
             await self.hass.services.async_call(DOMAIN, name, data)
 
     async def turn_on(self):
-        await self.call_service("turn_on", {})
+        await _call_service(self.hass, "turn_on", self.entity_id)
         self.default_source = self.attrs.get('source')
 
     async def turn_off(self):
         await self.select_default_source()
-        await self.call_service("turn_off", {})
+        await _call_service(self.hass, "turn_off", self.entity_id)
 
     async def mute_volume(self, mute):
-        await self.call_service("volume_mute", {"is_volume_muted": mute})
+        data = {"is_volume_muted": mute}
+        await _call_service(self.hass, "volume_mute", self.entity_id, data)
 
     async def set_volume_level(self, volume):
         data = {"volume_level": self.get_volume_level(volume)}
-        await self.call_service("volume_set", data)
+        await _call_service(self.hass, "volume_set", self.entity_id, data)
 
     async def set_default_volume(self):
         if self.default_volume is not None:
             data = {"volume_level": self.default_volume / 100}
-            await self.call_service("volume_set", data)
+            await _call_service(self.hass, "volume_set", self.entity_id, data)
 
     async def select_source(self, source):
-        await self.call_service("select_source", {"source": source})
+        data = {"source": source}
+        await _call_service(self.hass, "select_source", self.entity_id, data)
 
     async def select_default_source(self):
         if self.default_source is not None:
@@ -284,12 +345,13 @@ class Wrapped:
 
 class Group(MediaPlayerDevice, RestoreEntity):
 
-    def __init__(self, hass, name, group, speakers):
+    def __init__(self, hass, name, group, speakers, sources):
         """Initialize the Universal media device."""
         self.hass = hass
         self._name = name
-        self._speakers = speakers
         self._snap_entity = group
+        self._speakers = speakers
+        self._sources = sources  # dict[name: Source]
         self._state = STATE_OFF
 
     async def async_added_to_hass(self):
@@ -329,11 +391,13 @@ class Group(MediaPlayerDevice, RestoreEntity):
 
     @property
     def source(self):
-        return self._snap_attr.get('source')
+        sources_name = {s.snapcast_source: s.name for s in self._sources.values()}
+        snap_source = self._snap_attr.get('source')
+        return sources_name.get(snap_source, snap_source)
 
     @property
     def source_list(self):
-        return self._snap_attr.get('source_list')
+        return list(self._sources)
 
     @property
     def volume_level(self):
@@ -351,30 +415,29 @@ class Group(MediaPlayerDevice, RestoreEntity):
             | SUPPORT_VOLUME_MUTE
             | SUPPORT_VOLUME_STEP
             | SUPPORT_SELECT_SOURCE
+            | SUPPORT_PLAY
+            | SUPPORT_PAUSE
+            | SUPPORT_STOP
         )
-
-    async def _async_call_snap_service(self, name, data):
-        data["entity_id"] = self._snap_entity
-        await self.hass.services.async_call(DOMAIN, name, data)
 
     async def async_turn_on(self):
         for speaker in self._speakers:
             if speaker._on_default:
-                data = {'entity_id': speaker.entity_id}
-                await self.hass.services.async_call(DOMAIN, "turn_on", data)
+                /?hc_location=ufiawait _call_service(self.hass, "turn_on", speaker.entity_id)
         self._state = STATE_ON
         self.async_schedule_update_ha_state(True)
 
     async def async_turn_off(self):
         for speaker in self._speakers:
             if speaker._on_default:
-                data = {'entity_id': speaker.entity_id}
-                await self.hass.services.async_call(DOMAIN, "turn_off", data)
+                await _call_service(self.hass, "turn_off", speaker.entity_id)
         self._state = STATE_OFF
         self.async_schedule_update_ha_state(True)
 
     async def async_mute_volume(self, mute):
-        await self._async_call_snap_service("volume_mute", {"is_volume_muted": mute})
+        data = {"is_volume_muted": mute}
+        await _call_service(self.hass, "volume_mute", self._snap_entity, data)
+        self.async_schedule_update_ha_state(True)
 
     async def async_volume_up(self):
         for speaker in self._speakers:
@@ -385,4 +448,29 @@ class Group(MediaPlayerDevice, RestoreEntity):
             await speaker.async_volume_down()
 
     async def async_select_source(self, source):
-        await self._async_call_snap_service("select_source", {"source": source})
+        source_inst = self._sources[source]
+        await source_inst.select()
+        data = {"source": source_inst.snapcast_source}
+        await _call_service(self.hass, "select_source", self._snap_entity, data)
+        self.async_schedule_update_ha_state(True)
+
+    async def async_media_play(self):
+        source = self._sources.get(self.source)
+        if source is not None:
+            await source.media_play()
+        self._state = STATE_PLAYING
+        self.async_schedule_update_ha_state(True)
+
+    async def async_media_pause(self):
+        source = self._sources.get(self.source)
+        if source is not None:
+            await source.media_pause()
+        self._state = STATE_PAUSED
+        self.async_schedule_update_ha_state(True)
+
+    async def async_media_stop(self):
+        source = self._sources.get(self.source)
+        if source is not None:
+            await source.media_stop()
+        self._state = STATE_STOPPED
+        self.async_schedule_update_ha_state(True)
