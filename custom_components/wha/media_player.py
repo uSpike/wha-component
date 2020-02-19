@@ -423,7 +423,7 @@ class Group(MediaPlayerDevice, RestoreEntity):
     async def async_turn_on(self):
         for speaker in self._speakers:
             if speaker._on_default:
-                /?hc_location=ufiawait _call_service(self.hass, "turn_on", speaker.entity_id)
+                await _call_service(self.hass, "turn_on", speaker.entity_id)
         self._state = STATE_ON
         self.async_schedule_update_ha_state(True)
 
