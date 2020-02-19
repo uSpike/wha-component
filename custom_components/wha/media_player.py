@@ -13,7 +13,6 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     STATE_PLAYING,
     STATE_PAUSED,
-    STATE_STOPPED,
 )
 from homeassistant.components.media_player import PLATFORM_SCHEMA, MediaPlayerDevice
 from homeassistant.components.media_player.const import (
@@ -472,5 +471,5 @@ class Group(MediaPlayerDevice, RestoreEntity):
         source = self._sources.get(self.source)
         if source is not None:
             await source.media_stop()
-        self._state = STATE_STOPPED
+        self._state = STATE_IDLE
         self.async_schedule_update_ha_state(True)
